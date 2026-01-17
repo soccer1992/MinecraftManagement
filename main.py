@@ -14,7 +14,7 @@ import uuid
 
 if not os.path.exists("config.json"):
     with open('config.json','w') as f:
-        json.dump({"host":"","port":""},f)
+        json.dump({"host":"","port":0},f)
 config = json.load(open('config.json'))
 host,port = config['host'], config['port']
 
