@@ -5,11 +5,11 @@ import colorama
 colorama.init() # Initiates the terminal colors.
 import random
 import threading # For the client connection threads + RCON
+import dns.resolver
 
 from MinecraftTools import * # For minecraft packet handling.
 from minecraftClient import Client
 import uuid
-# Lets make a very simple test by making a TCP server and making it show a Minecraft MOTD.
 
 
 if not os.path.exists("config.json"):
@@ -17,6 +17,20 @@ if not os.path.exists("config.json"):
         json.dump({"host":"","port":0},f)
 config = json.load(open('config.json'))
 host,port = config['host'], config['port']
+
+if port=='default':
+    print('[SCANNER] Port is default, fetching SRV host & port')
+    port = 25565
+    if socket.gethostbyname(host)==host:
+        print('[SCANNER] Host inputted is a IP, no fetching required. (Using default port of 25565)')
+    else:
+        print('[SCANNER] Fetching SRV info...')
+        try:
+            answer = dns.resolver.resolve('_minecraft._tcp.' + host, 'SRV')[0]
+            print(f'[SCANNER] Detected SRV info:\nHost: {answer.target}\nPort: {answer.port}')
+            host,port = answer.target.to_text(), answer.port
+        except:
+            print('[SCANNER] No SRV found, using default 25565 port')
 
 onlinePlayers=[]
 HOST = "0.0.0.0"   # Listen on all interfaces
@@ -102,7 +116,7 @@ def forward_data(c, s, instantSend: threading.Event, token):
 
 
     except Exception as e:
-        #print('error',e)
+        print('error',e)
         s.close()
 def getCompress(packet, compressLimit):
     if compressLimit is not None:
@@ -124,7 +138,7 @@ def handle_client(conn, addr):
     clientServer = Client(host, port)
     instantForward = threading.Event()
     serverConnection = None
-    if 1:
+    try:
         with conn:
             while True:
                 #print(conn.fileno())
@@ -136,7 +150,7 @@ def handle_client(conn, addr):
                     break
 
                 #print(instantForward.is_set())
-                if instantForward.is_set()and 0:
+                if instantForward.is_set():
                     #print(data)
                     serverConnection.sendall(data)
                     continue
@@ -207,7 +221,7 @@ def handle_client(conn, addr):
 
                                 if packetId==0x00:
                                     # its gonna contain a username + UUID
-                                    print(packet.origPacket)
+                                    #print(packet.origPacket)
                                     username = packet.readString().decode()
                                     uuid14 = packet.readUUID()
                                     continueThrough = True
@@ -238,6 +252,8 @@ def handle_client(conn, addr):
                                         newThing.writeString(username.encode())
                                         newThing.writeUUID(uuid14)
                                         #serverConnection.sendall(newThing.getPacket())
+                                        #instantForward.set()
+
                                         sessions[sessionToken]['serverConnection'] = serverConnection
                                         threading.Thread(target=forward_data,args=(serverConnection, conn, instantForward, sessionToken)).start()
                                     #instantForward.set()
@@ -254,7 +270,7 @@ def handle_client(conn, addr):
                                     newPacket = Packet()
                                     newPacket.writeVarInt(0)
                                     newPacket.writeString(json.dumps(clientServer.getPingInfo(protoVersion,defaultError=
-                                                                                              buildMotdJSON("MineManager", protoVersion, {"text": "Failed to connect to server...","color":"red"}, -1, 1))
+                                                                                              buildMotdJSON("MineManagement", protoVersion, {"text": "Failed to connect to server...","color":"red"}, -1, 1))
                                                                      ).encode())
                                     #newPacket.writeString(json.dumps(
                                     #    buildMotdJSON("MineTest", protoVersion, {"text": "MOTD test"}, 999, 999)).encode())
@@ -271,8 +287,8 @@ def handle_client(conn, addr):
 
                     #print(packet.packet)
                     # Read the packet data.
-    #except Exception as err:
-     #   print(f'[CONNECTION] Connection error, {repr(err)}')
+    except Exception as err:
+       print(f'[CONNECTION] Connection error, {repr(err)}')
 
     print(f"[DISCONNECTED] {addr}")
     del sessions[sessionToken]
