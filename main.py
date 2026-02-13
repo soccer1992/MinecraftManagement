@@ -12,11 +12,73 @@ from minecraftClient import Client
 import uuid
 
 
+def getPacketId(ids, protocol):
+    CurrentMaxProto = 0
+    for i in ids.keys():
+        if (i>CurrentMaxProto) and (i<=protocol):
+            CurrentMaxProto = i
+    return ids[CurrentMaxProto]
+
+SystemChat = {
+    0: -1,
+
+    mappings["MINECRAFT_1_19"]: 0x5F,
+    mappings["MINECRAFT_1_19_1"]: 0x62,
+    mappings["MINECRAFT_1_19_3"]: 0x60,
+    mappings["MINECRAFT_1_19_4"]: 0x64,
+    mappings["MINECRAFT_1_20_2"]: 0x67,
+    mappings["MINECRAFT_1_20_3"]: 0x69,
+    mappings["MINECRAFT_1_20_5"]: 0x6C,
+    mappings["MINECRAFT_1_21_2"]: 0x73,
+    mappings["MINECRAFT_1_21_5"]: 0x72,
+    999: 0x72}
+
+# works in 1.16> systemchat,
+
+ClientChat = {
+    0: -1,
+    mappings["MINECRAFT_1_8"]: 0x02,
+    mappings["MINECRAFT_1_9"]: 0x0F,
+    mappings["MINECRAFT_1_13"]: 0x0E,
+    mappings["MINECRAFT_1_15"]: 0x0F,
+    mappings["MINECRAFT_1_16"]: 0x0E,
+    mappings["MINECRAFT_1_17"]: 0x0F,
+    mappings["MINECRAFT_1_19"]: -1,
+    999: -1
+
+}
+
+PluginMsg =  {mappings["MINECRAFT_1_8"]: 0x3F,
+                    mappings["MINECRAFT_1_9"]: 0x18,
+                    mappings["MINECRAFT_1_13"]: 0x19,
+                    mappings["MINECRAFT_1_14"]: 0x18,
+                    mappings["MINECRAFT_1_15"]: 0x19,
+                    mappings["MINECRAFT_1_16"]: 0x18,
+                    mappings["MINECRAFT_1_16_2"]: 0x17,
+                    mappings["MINECRAFT_1_17"]: 0x18,
+                    mappings["MINECRAFT_1_19"]: 0x15,
+                    mappings["MINECRAFT_1_19_1"]: 0x16,
+                    mappings["MINECRAFT_1_19_3"]: 0x15,
+                    mappings["MINECRAFT_1_19_4"]: 0x17,
+                    mappings["MINECRAFT_1_20_2"]: 0x18,
+                    mappings["MINECRAFT_1_20_5"]: 0x19,
+                    mappings["MINECRAFT_1_21_5"]: 0x18}
 if not os.path.exists("config.json"):
     with open('config.json','w') as f:
         json.dump({"host":"","port":0},f)
 config = json.load(open('config.json'))
 host,port = config['host'], config['port']
+origHost = str(host)
+def asyncSyncSRV():
+    global host,port,origHost
+    try:
+        answer = dns.resolver.resolve('_minecraft._tcp.' + origHost, 'SRV')[0]
+        #print(f'[SCANNER] Detected SRV info:\nHost: {answer.target}\nPort: {answer.port}')
+        host, port = answer.target.to_text(), answer.port
+    except:
+        ... # we usin the default port
+        #print('[SCANNER] No SRV found, using default 25565 port')
+
 
 if port=='default':
     print('[SCANNER] Port is default, fetching SRV host & port')
@@ -78,13 +140,36 @@ def forward_data(c, s, instantSend: threading.Event, token):
                         readPacket.packet = readPacket.origPacket
                     packetId = readPacket.readVarInt()
                 #print(packetId, readPacket.packet)
+                if state=='PLAY':
+                    if packetId==getPacketId(PluginMsg, sessions[token]['proto']):
+                        dumbPacket = Packet()
+                        #print(readPacket.origPacket)
+                        msgChannel = readPacket.readString()
+                        if msgChannel!=b'minecraft:brand':
+                            msgInfo = readPacket.readRaw(9999999)
+                            if msgChannel==b'minecraft:register':
+                                msgInfo=msgInfo.split(b' ')
+                            else:
+                                msgInfo = msgInfo.decode()
+                        else:
+                            msgInfo = readPacket.readString()
+                        print(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo}')
+                        if msgChannel==b'minecraft:brand':
+                            dumbPacket.writeVarInt(packetId)
+                            dumbPacket.writeString(b'minecraft:brand')
+                            dumbPacket.writeString(msgInfo + (b' [MineManagement]'))
+                            readPacket.origPacket = dumbPacket.packet
+                            readPacket.packet = readPacket.origPacket
                 if state=='CONFIG':
                     if packetId==0x01:
                         dumbPacket = Packet()
-                        if readPacket.readString()==b'minecraft:brand':
+                        msgChannel = readPacket.readString()
+                        msgInfo = readPacket.readString()
+                        print(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo.decode()}')
+                        if msgChannel==b'minecraft:brand':
                             dumbPacket.writeVarInt(packetId)
                             dumbPacket.writeString(b'minecraft:brand')
-                            dumbPacket.writeString(readPacket.readString() + b' [MineManagement]')
+                            dumbPacket.writeString(msgInfo + (b' [MineManagement]'))
                             readPacket.origPacket = dumbPacket.packet
                             readPacket.packet = readPacket.origPacket
                         #dumbPacket.writeVarInt(packetId)
@@ -130,7 +215,7 @@ def handle_client(conn, addr):
     global sessions
     print(f"[NEW CONNECTION] {addr}")
     sessionToken = ''.join(random.choices('0123456789abcdef',k=16))
-    sessions[sessionToken] = {"serverConnection":None, "client":conn, "compression_limit": None, "login_stage_not":threading.Event(),"state":None,'username':None}
+    sessions[sessionToken] = {"serverConnection":None, "client":conn, "compression_limit": None, "login_stage_not":threading.Event(),"state":None,'username':None, 'proto':None}
     hasHandshaked = False
     STATE = "HANDSHAKE"
     clientPacket = PacketHelper()
@@ -189,6 +274,7 @@ def handle_client(conn, addr):
                         print("[HANDSHAKE] Player connected with handshake IP:",(connectAddr.decode()) + ":" + str(connectPort))
                         print("[HANDSHAKE] Protocol version:",protoVersion)
                         print("[HANDSHAKE] Intent:",intent)
+                        sessions[sessionToken]['proto'] = protoVersion
                         if intent==1:
                             # Status
                             STATE = "STATUS"
@@ -304,6 +390,7 @@ def start_server():
 
     while True:
         conn, addr = server.accept()
+        threading.Thread(target=asyncSyncSRV,daemon=True).start()
         thread = threading.Thread(
             target=handle_client,
             args=(conn, addr),

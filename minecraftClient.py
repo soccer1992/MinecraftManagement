@@ -47,8 +47,6 @@ class Client:
                     return None
                 return jsonData
         except Exception as m:
-            print(m)
             if defaultError: return defaultError
             return None
-
 
