@@ -136,7 +136,13 @@ def forward_data(c, s, instantSend: threading.Event, token):
                     if packetId == 0:
                         readPacket.origPacket = readPacket.packet
                     else:
-                        readPacket.origPacket = zlib.decompress(readPacket.packet)
+                        try:
+                            readPacket.origPacket = zlib.decompress(readPacket.packet)
+                        except:
+                            print(f'[ERROR] Error processing packet for player {sessions[token]['username']}')
+                            s.sendall(m)
+                            continue
+
                         readPacket.packet = readPacket.origPacket
                     packetId = readPacket.readVarInt()
                 #print(packetId, readPacket.packet)
