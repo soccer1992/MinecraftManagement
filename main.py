@@ -306,8 +306,8 @@ def handle_client(conn, addr):
                         connectPort = packet.readUSignInt()[0]
                         intent = packet.readVarInt()
                         logger.info("[HANDSHAKE] Player connected with handshake IP: " + (connectAddr.decode()) + ":" + str(connectPort))
-                        logger.info("[HANDSHAKE] Protocol version: " + protoVersion)
-                        logger.info("[HANDSHAKE] Intent: " + intent)
+                        logger.info(f"[HANDSHAKE] Protocol version: {protoVersion}" )
+                        logger.info(f"[HANDSHAKE] Intent: {intent}")
                         sessions[sessionToken]['proto'] = protoVersion
                         if intent==1:
                             # Status
