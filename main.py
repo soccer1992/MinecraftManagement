@@ -1,3 +1,4 @@
+from loguru import logger
 import json
 import os.path
 import socket
@@ -6,7 +7,14 @@ colorama.init() # Initiates the terminal colors.
 import random
 import threading # For the client connection threads + RCON
 import dns.resolver
+import ipaddress
 
+def is_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
 from MinecraftTools import * # For minecraft packet handling.
 from minecraftClient import Client
 import uuid
@@ -83,7 +91,7 @@ def asyncSyncSRV():
 if port=='default':
     print('[SCANNER] Port is default, fetching SRV host & port')
     port = 25565
-    if socket.gethostbyname(host)==host:
+    if is_ip(host):
         print('[SCANNER] Host inputted is a IP, no fetching required. (Using default port of 25565)')
     else:
         print('[SCANNER] Fetching SRV info...')
@@ -98,6 +106,12 @@ onlinePlayers=[]
 HOST = "0.0.0.0"   # Listen on all interfaces
 PORT = 25568
 
+def kickPlayerInLoginCompress(conn, msg, compLimit):
+    kickPacket = Packet()
+    kickPacket.writeVarInt(0)
+    kickPacket.writeString(msg)
+    conn.sendall(getCompress(kickPacket,compLimit))
+
 def kickPlayerInLogin(conn, msg):
     kickPacket = Packet()
     kickPacket.writeVarInt(0)
@@ -106,15 +120,17 @@ def kickPlayerInLogin(conn, msg):
 def forward_data(c, s, instantSend: threading.Event, token):
     global sessions
     helper = PacketHelper()
+    name = sessions[token]['username']
+    realLimit = -1
     try:
         while True:
 
-            m = c.recv(2**16)
+            m = c.recv(10)
             #print(m)
             if not m:
                 #print('close')
                 s.close()
-                break
+                return
             #print(instantSend.is_set(),m)
             #print(m)
             if instantSend.is_set():
@@ -128,9 +144,9 @@ def forward_data(c, s, instantSend: threading.Event, token):
                 notInLoginStage = sessions[token]['login_stage_not']
                 state = sessions[token]['state']
                 overrideDefaultPacketSending = False
-
+                #print(readPacket.origPacket)
                 packetId = readPacket.readVarInt()
-                realOrigPacket = readPacket.origPacket
+                realOrigPacket = bytes(readPacket.origPacket)
                 compressLimit = sessions[token]['compression_limit']
                 if compressLimit is not None:
                     if packetId == 0:
@@ -139,8 +155,12 @@ def forward_data(c, s, instantSend: threading.Event, token):
                         try:
                             readPacket.origPacket = zlib.decompress(readPacket.packet)
                         except:
-                            print(f'[ERROR] Error processing packet for player {sessions[token]['username']}')
-                            s.sendall(m)
+                            print(realOrigPacket,sessions)
+                            logger.error(f'Error processing packet for player {name}')
+                            raise ValueError("Error processing packet")
+                            #z = Packet()
+                            #z.writeRaw(realOrigPacket)
+                            #s.sendall(z.getPacket())
                             continue
 
                         readPacket.packet = readPacket.origPacket
@@ -159,7 +179,7 @@ def forward_data(c, s, instantSend: threading.Event, token):
                                 msgInfo = msgInfo.decode()
                         else:
                             msgInfo = readPacket.readString()
-                        print(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo}')
+                        logger.info(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo}')
                         if msgChannel==b'minecraft:brand':
                             dumbPacket.writeVarInt(packetId)
                             dumbPacket.writeString(b'minecraft:brand')
@@ -171,7 +191,7 @@ def forward_data(c, s, instantSend: threading.Event, token):
                         dumbPacket = Packet()
                         msgChannel = readPacket.readString()
                         msgInfo = readPacket.readString()
-                        print(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo.decode()}')
+                        logger.info(f'[FORWARDER] Plugin message sent S->C, {msgChannel.decode()}: {msgInfo.decode()}')
                         if msgChannel==b'minecraft:brand':
                             dumbPacket.writeVarInt(packetId)
                             dumbPacket.writeString(b'minecraft:brand')
@@ -185,7 +205,7 @@ def forward_data(c, s, instantSend: threading.Event, token):
                     #print(packetId)
                     if packetId==0x01:
                         instantSend.set()
-                        print("[FORWARDER] The server is online-mode, enabling instant-forward mode.")
+                        logger.warning("[FORWARDER] The server is online-mode, enabling instant-forward mode.")
                     if packetId==0x02:
                         ...
                         #inLoginStage = False
@@ -194,9 +214,10 @@ def forward_data(c, s, instantSend: threading.Event, token):
 
                     if packetId==0x03:
                         compressAmount = readPacket.readVarInt()
-                        print(f'[FORWARDER] Compression has been changed to: {compressAmount}')
+                        logger.info(f'[FORWARDER] Compression has been changed to: {compressAmount}')
                         if compressAmount>-1:
                             sessions[token]['compression_limit'] = compressAmount
+                            realLimit = compressAmount
                 copyP = Packet()
                 #copyP.writeVarInt(packetId)
                 copyP.writeRaw(readPacket.origPacket)
@@ -207,7 +228,14 @@ def forward_data(c, s, instantSend: threading.Event, token):
 
 
     except Exception as e:
-        print('error',e)
+        print(e,state)
+        if state=='LOGINAWAIT' and not instantSend.is_set():
+            kickMsg = json.dumps({"text":"Forwarding error: ","color":"dark_red","extra":[repr(e)]}).encode()
+            if realLimit>-1:
+                kickPlayerInLoginCompress(s, kickMsg,realLimit)
+            else:
+                kickPlayerInLogin(s,kickMsg)
+        logger.error('S -> C error: ' + repr(e))
         s.close()
 def getCompress(packet, compressLimit):
     if compressLimit is not None:
@@ -219,7 +247,7 @@ def getCompress(packet, compressLimit):
 sessions = {}
 def handle_client(conn, addr):
     global sessions
-    print(f"[NEW CONNECTION] {addr}")
+    logger.info(f"[NEW CONNECTION] {addr}")
     sessionToken = ''.join(random.choices('0123456789abcdef',k=16))
     sessions[sessionToken] = {"serverConnection":None, "client":conn, "compression_limit": None, "login_stage_not":threading.Event(),"state":None,'username':None, 'proto':None}
     hasHandshaked = False
@@ -268,7 +296,7 @@ def handle_client(conn, addr):
                     # The server should first send a 0x00 Packet (Handshake)
                     if not hasHandshaked:
                         if packetId!=0x00:
-                            print(f"[DISCONNECTED - INVALID PACKET] {addr} ")
+                            logger.error(f"[DISCONNECTED - INVALID PACKET] {addr} ")
                             conn.close()
                             return
                         hasHandshaked = True
@@ -277,9 +305,9 @@ def handle_client(conn, addr):
                         connectAddr = packet.readString()
                         connectPort = packet.readUSignInt()[0]
                         intent = packet.readVarInt()
-                        print("[HANDSHAKE] Player connected with handshake IP:",(connectAddr.decode()) + ":" + str(connectPort))
-                        print("[HANDSHAKE] Protocol version:",protoVersion)
-                        print("[HANDSHAKE] Intent:",intent)
+                        logger.info("[HANDSHAKE] Player connected with handshake IP: " + (connectAddr.decode()) + ":" + str(connectPort))
+                        logger.info("[HANDSHAKE] Protocol version: " + protoVersion)
+                        logger.info("[HANDSHAKE] Intent: " + intent)
                         sessions[sessionToken]['proto'] = protoVersion
                         if intent==1:
                             # Status
@@ -301,26 +329,28 @@ def handle_client(conn, addr):
                             case "CONFIG":
                                 if packetId==0x03:
                                     STATE = "PLAY"
-                                    print("[FORWARDER (C->S)] Entered the PLAY state.")
+                                    logger.info("[FORWARDER (C->S)] Entered the PLAY state.")
                                 #print('config')
                             case "LOGINAWAIT":
                                 # Next packet will be the login data
                                 # forward thing
+                                print(packetId)
                                 if packetId==0x03:
                                     STATE = "CONFIG"
                                     sessions[sessionToken]['login_stage_not'].set()
-                                    print("[FORWARDER (C->S)] Entered configuration phase.")
+                                    logger.info("[FORWARDER (C->S)] Entered configuration phase.")
 
                                 if packetId==0x00:
                                     # its gonna contain a username + UUID
                                     #print(packet.origPacket)
                                     username = packet.readString().decode()
                                     uuid14 = packet.readUUID()
+                                   # print(uuid14)
                                     continueThrough = True
 
-                                    print(f"[LOGIN] User {username} ({str(uuid.UUID(hex(uuid14)[2:]))}) connected.")
+                                    logger.info(f"[LOGIN] User {username} ({str(uuid.UUID(int=uuid14))}) connected.")
 
-                                    print("[FORWARDER] Starting.")
+                                    logger.info("[FORWARDER] Starting.")
                                     serverConnection =  socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                                     serverConnection.settimeout(15)
                                     if 1:
@@ -358,7 +388,7 @@ def handle_client(conn, addr):
                                     copyPacket.writeRaw(packet.origPacket)
                                     conn.sendall(copyPacket.getPacket())
                                 if packetId==0x00:
-                                    print("[STATUS] Pinging server...")
+                                    logger.info("[STATUS] Pinging server...")
                                     newPacket = Packet()
                                     newPacket.writeVarInt(0)
                                     newPacket.writeString(json.dumps(clientServer.getPingInfo(protoVersion,defaultError=
@@ -376,13 +406,14 @@ def handle_client(conn, addr):
                         serverConnection.sendall(getCompress(copyPacket, compressLimit))
                     packet = clientPacket.readPacket()
                     sessions[sessionToken]['state'] = STATE
+                    #print(STATE)
 
                     #print(packet.packet)
                     # Read the packet data.
     except Exception as err:
-       print(f'[CONNECTION] Connection error, {repr(err)}')
+       logger.error(f'[CONNECTION] Connection error, {repr(err)}')
 
-    print(f"[DISCONNECTED] {addr}")
+    logger.info(f"[DISCONNECTED] {addr}")
     del sessions[sessionToken]
     if serverConnection:
         serverConnection.close()
